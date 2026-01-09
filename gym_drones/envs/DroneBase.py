@@ -25,6 +25,11 @@ class DroneBase(gym.Env):
         ctrl_freq: int = 100,
         domain_rand: bool = False,
         drone_model_path: Optional[Union[str, os.PathLike]] = None,
+        num_obstacles: int = 0,
+        obstacle_size: float = 0.5,
+        ray_length: float = 5.0,
+        num_rays: int = 12,
+        obstacle_safe_dist: float = 0.3,
     ):
         """
         Initialization of a single agent drone env.
@@ -98,6 +103,17 @@ class DroneBase(gym.Env):
         #### Compute constants #####################################
         self.GRAVITY = self.G * self.M
         self.MAX_THRUST = self.GRAVITY * self.TWR_MAX
+
+        #### Obstacle Parameters ####################################
+        self.NUM_OBSTACLES = num_obstacles
+        self.OBSTACLE_SIZE = obstacle_size
+        self.RAY_LENGTH = ray_length
+        self.NUM_RAYS = num_rays
+        self.OBSTACLE_SAFE_DIST = obstacle_safe_dist
+        # Obstacles stored as (NUM_OBSTACLES, 3) array: [x, y, z] positions
+        self.obstacles = np.zeros((self.NUM_OBSTACLES, 3))
+        # Ray directions (NUM_RAYS, 3) - normalized direction vectors
+        self._initRayDirections()
 
         #### Set initial states ####################################
         # Targets
@@ -814,6 +830,191 @@ class DroneBase(gym.Env):
         noise = np.random.normal(0, sensor_sigma, x_real.shape)
         noisy_x = x_real + noise
         return noisy_x
+
+    ################################################################################
+
+    def _initRayDirections(self) -> None:
+        """Initialize ray directions for obstacle detection.
+
+        Creates NUM_RAYS rays distributed in a horizontal circle around the drone.
+        """
+        if self.NUM_RAYS > 0:
+            angles = np.linspace(0, 2 * np.pi, self.NUM_RAYS, endpoint=False)
+            # Create rays in horizontal plane (xy) with slight vertical variation
+            self.ray_directions = np.zeros((self.NUM_RAYS, 3))
+            self.ray_directions[:, 0] = np.cos(angles)  # x component
+            self.ray_directions[:, 1] = np.sin(angles)  # y component
+            self.ray_directions[:, 2] = 0.0  # z component (horizontal plane)
+            # Normalize
+            norms = np.linalg.norm(self.ray_directions, axis=1, keepdims=True)
+            self.ray_directions = self.ray_directions / (norms + 1e-8)
+        else:
+            self.ray_directions = np.zeros((0, 3))
+
+    ################################################################################
+
+    def _castRays(self, drone_pos: np.ndarray, drone_rot: np.ndarray) -> np.ndarray:
+        """Cast rays from drone position and return distances to obstacles.
+
+        Parameters
+        ----------
+        drone_pos : ndarray[float]
+            (3,)-shaped array containing the drone position [x, y, z].
+        drone_rot : ndarray[float]
+            (3, 3)-shaped array containing the rotation matrix.
+
+        Returns
+        -------
+        ndarray[float]
+            (NUM_RAYS,)-shaped array containing the distance to nearest obstacle
+            for each ray, or RAY_LENGTH if no obstacle is hit.
+        """
+        if self.NUM_OBSTACLES == 0 or self.NUM_RAYS == 0:
+            return np.full(self.NUM_RAYS, self.RAY_LENGTH)
+
+        # Transform ray directions to world frame using drone rotation
+        ray_dirs_world = (drone_rot @ self.ray_directions.T).T  # (NUM_RAYS, 3)
+
+        # Initialize distances to max ray length
+        ray_distances = np.full(self.NUM_RAYS, self.RAY_LENGTH)
+
+        # For each ray, find the closest intersection with any obstacle
+        for ray_idx in range(self.NUM_RAYS):
+            ray_dir = ray_dirs_world[ray_idx]
+            ray_start = drone_pos
+
+            # Check intersection with each obstacle (treated as spheres)
+            for obs_idx in range(self.NUM_OBSTACLES):
+                obs_center = self.obstacles[obs_idx]
+                obs_radius = self.OBSTACLE_SIZE / 2.0
+
+                # Vector from ray start to obstacle center
+                to_obs = obs_center - ray_start
+
+                # Project to_obs onto ray direction
+                proj_length = np.dot(to_obs, ray_dir)
+
+                # If projection is negative, obstacle is behind the ray start
+                if proj_length < 0:
+                    continue
+
+                # Closest point on ray to obstacle center
+                closest_point = ray_start + proj_length * ray_dir
+
+                # Distance from closest point to obstacle center
+                dist_to_center = np.linalg.norm(closest_point - obs_center)
+
+                # If distance is less than obstacle radius, ray intersects
+                if dist_to_center <= obs_radius:
+                    # Calculate intersection distance
+                    # Use Pythagorean theorem: proj_length^2 - (dist_to_center^2 - radius^2)
+                    if dist_to_center < obs_radius:
+                        # Ray starts inside obstacle
+                        intersection_dist = 0.0
+                    else:
+                        # Calculate distance along ray to intersection point
+                        half_chord = np.sqrt(obs_radius**2 - dist_to_center**2)
+                        intersection_dist = proj_length - half_chord
+
+                    # Update if this is the closest intersection so far
+                    if intersection_dist >= 0 and intersection_dist < ray_distances[ray_idx]:
+                        ray_distances[ray_idx] = intersection_dist
+
+        return ray_distances
+
+    ################################################################################
+
+    def _generateObstacles(self, min_dist_from_drones: float = 2.0) -> None:
+        """Generate random obstacles in the environment.
+
+        Parameters
+        ----------
+        min_dist_from_drones : float, optional
+            Minimum distance obstacles should be from initial drone positions.
+        """
+        if self.NUM_OBSTACLES == 0:
+            return
+
+        obstacles = []
+        max_attempts = 100 * self.NUM_OBSTACLES
+
+        for _ in range(self.NUM_OBSTACLES):
+            attempt = 0
+            while attempt < max_attempts:
+                # Generate random position within bounds
+                obs_pos = np.array(
+                    [
+                        self.np_random.uniform(-self.MAX_POS_XY / 2, self.MAX_POS_XY / 2),
+                        self.np_random.uniform(-self.MAX_POS_XY / 2, self.MAX_POS_XY / 2),
+                        self.np_random.uniform(
+                            self.INIT_HEIGHT - self.MAX_POS_Z / 2, self.INIT_HEIGHT + self.MAX_POS_Z / 2
+                        ),
+                    ]
+                )
+
+                # Check distance from all drones
+                too_close = False
+                for drone_pos in self.INIT_XYZS:
+                    dist = np.linalg.norm(obs_pos - drone_pos)
+                    if dist < min_dist_from_drones:
+                        too_close = True
+                        break
+
+                # Check distance from other obstacles
+                for existing_obs in obstacles:
+                    dist = np.linalg.norm(obs_pos - existing_obs)
+                    if dist < self.OBSTACLE_SIZE:
+                        too_close = True
+                        break
+
+                if not too_close:
+                    obstacles.append(obs_pos)
+                    break
+
+                attempt += 1
+
+            # If we couldn't place it, place it anyway (might overlap)
+            if attempt >= max_attempts:
+                obs_pos = np.array(
+                    [
+                        self.np_random.uniform(-self.MAX_POS_XY / 2, self.MAX_POS_XY / 2),
+                        self.np_random.uniform(-self.MAX_POS_XY / 2, self.MAX_POS_XY / 2),
+                        self.np_random.uniform(
+                            self.INIT_HEIGHT - self.MAX_POS_Z / 2, self.INIT_HEIGHT + self.MAX_POS_Z / 2
+                        ),
+                    ]
+                )
+                obstacles.append(obs_pos)
+
+        self.obstacles = np.array(obstacles)
+        # print(f"[OBSTACLE DEBUG] Generated {len(self.obstacles)} obstacles at positions:\n{self.obstacles}")
+
+    ################################################################################
+
+    def _checkObstacleCollision(self, drone_pos: np.ndarray) -> bool:
+        """Check if drone collides with any obstacle.
+
+        Parameters
+        ----------
+        drone_pos : ndarray[float]
+            (3,)-shaped array containing the drone position.
+
+        Returns
+        -------
+        bool
+            True if drone collides with an obstacle, False otherwise.
+        """
+        if self.NUM_OBSTACLES == 0:
+            return False
+
+        collision_radius = self.COLLISION_R + self.OBSTACLE_SIZE / 2.0
+
+        for obs_pos in self.obstacles:
+            dist = np.linalg.norm(drone_pos - obs_pos)
+            if dist < collision_radius:
+                return True
+
+        return False
 
     ################################################################################
 

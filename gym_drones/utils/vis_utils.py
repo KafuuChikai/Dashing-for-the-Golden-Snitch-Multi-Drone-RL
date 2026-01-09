@@ -147,6 +147,8 @@ def create_raceplotter(
     shape_kwargs: dict,
     noise_matrix: np.ndarray,
     moving_gate_data: Optional[np.ndarray] = None,
+    obstacles: Optional[np.ndarray] = None,
+    obstacle_size: float = 0.5,
 ) -> BasePlotterList:
     """
     Create a RacePlotter list.
@@ -188,6 +190,10 @@ def create_raceplotter(
             crash_kwargs=crash_kwargs,
             moving_gate_data=moving_gate_data[i],
         )
+        # Store obstacle data for visualization
+        if obstacles is not None:
+            raceplotter.obstacles = obstacles
+            raceplotter.obstacle_size = obstacle_size
         raceplotter_list.append(raceplotter)
     plotter = BasePlotterList(plotters=raceplotter_list)
     return plotter

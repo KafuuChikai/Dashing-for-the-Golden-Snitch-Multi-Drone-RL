@@ -37,6 +37,12 @@ class RaceEnv(MultiDroneAgentBase):
         drone_model_path: Optional[Union[str, os.PathLike]] = None,
         alert_dist: Optional[float] = None,
         collision_radius: Optional[float] = None,
+        num_obstacles: int = 0,
+        obstacle_size: float = 0.5,
+        ray_length: float = 5.0,
+        num_rays: int = 12,
+        obstacle_safe_dist: float = 0.3,
+        obstacle_reward_weight: float = 1.0,
     ):
         """Initialization of a multi agent RL environment.
 
@@ -111,6 +117,11 @@ class RaceEnv(MultiDroneAgentBase):
             sensor_sigma=sensor_sigma,
             domain_rand=domain_rand,
             drone_model_path=drone_model_path,
+            num_obstacles=num_obstacles,
+            obstacle_size=obstacle_size,
+            ray_length=ray_length,
+            num_rays=num_rays,
+            obstacle_safe_dist=obstacle_safe_dist,
         )
         self.at_goal = np.full(self.NUM_DRONES, False)
         self.crashed_step = np.zeros(self.NUM_DRONES, dtype=int)
@@ -119,6 +130,17 @@ class RaceEnv(MultiDroneAgentBase):
         self.active_masks = np.full(self.NUM_DRONES, True)
         self.alert_dist = 3 * self.COLLISION_R if alert_dist is None else alert_dist  # alert distance
         self.collision_dist = 2 * self.COLLISION_R if collision_radius is None else collision_radius  # collision radius
+        self.obstacle_reward_weight = obstacle_reward_weight  # lambda_obs in reward equation
+        # Beta parameter for exponential decay in obstacle reward (similar to drone safe reward)
+        self.obstacle_beta = 15.0  # decay rate for obstacle proximity penalty
+
+        # Debug: Print obstacle parameters
+        if self.NUM_OBSTACLES > 0:
+            print(
+                f"[OBSTACLE DEBUG] num_obstacles={self.NUM_OBSTACLES}, num_rays={self.NUM_RAYS}, "
+                f"obstacle_size={self.OBSTACLE_SIZE}, ray_length={self.RAY_LENGTH}, "
+                f"obstacle_safe_dist={self.OBSTACLE_SAFE_DIST}, obstacle_reward_weight={self.obstacle_reward_weight}"
+            )
 
     ################################################################################
 
@@ -227,8 +249,38 @@ class RaceEnv(MultiDroneAgentBase):
         crash_reward[self.Collisions_alert] -= 0.5
         self.crash_reward = crash_reward  # for logging
 
+        ########### compute obstacle avoidance reward ####################
+        obstacle_reward = np.zeros(self.NUM_DRONES)
+        if self.NUM_OBSTACLES > 0 and self.NUM_RAYS > 0:
+            # Cast rays for each drone to detect obstacles
+            for drone_idx in range(self.NUM_DRONES):
+                if self.crashed[drone_idx] or self.finished[drone_idx]:
+                    continue
+
+                drone_pos = self.pos[drone_idx]
+                drone_rot = self.rot[drone_idx]
+                ray_distances = self._castRays(drone_pos, drone_rot)
+
+                # Compute obstacle avoidance reward using exponential decay
+                # r_obs_dist = sum_k min(exp(-beta * (d_k - d_safe)), 1)
+                # where d_k is ray distance, d_safe is safety margin
+                safe_dist = self.OBSTACLE_SAFE_DIST
+                obs_reward_per_ray = np.minimum(np.exp(-self.obstacle_beta * (ray_distances - safe_dist)), 1.0)
+                # Sum over all rays and normalize
+                obstacle_reward[drone_idx] = -np.sum(obs_reward_per_ray) / self.NUM_RAYS
+
+        # Reset obstacle reward for crashed and finished drones
+        obstacle_reward[self.crashed | self.finished] = 0
+        self.obstacle_reward = obstacle_reward  # for logging
+
         # compute total reward
-        reward = prog_reward + command_reward + drone_safe_reward + crash_reward
+        reward = (
+            prog_reward
+            + command_reward
+            + drone_safe_reward
+            + crash_reward
+            + self.obstacle_reward_weight * obstacle_reward
+        )
 
         return reward
 
@@ -274,13 +326,21 @@ class RaceEnv(MultiDroneAgentBase):
         target_z = self.TARGET[:, 2]
         current_z = self.pos[:, 2]
 
+        # Check for obstacle collisions
+        obstacle_collisions = np.zeros(self.NUM_DRONES, dtype=bool)
+        if self.NUM_OBSTACLES > 0:
+            for drone_idx in range(self.NUM_DRONES):
+                if not (self.crashed[drone_idx] or self.finished[drone_idx]):
+                    obstacle_collisions[drone_idx] = self._checkObstacleCollision(self.pos[drone_idx])
+
         # Collisions do not count as truncation during training
         if self.EVAL_MODE:
             Truncated = np.logical_or(
-                self._checkCollision(self.COLLISION_R * 2), (np.abs(target_z - current_z) >= MAX_Z)
+                np.logical_or(self._checkCollision(self.COLLISION_R * 2), obstacle_collisions),
+                (np.abs(target_z - current_z) >= MAX_Z),
             )
         else:
-            Truncated = np.abs(target_z - current_z) >= MAX_Z
+            Truncated = np.logical_or(obstacle_collisions, (np.abs(target_z - current_z) >= MAX_Z))
 
         Truncated[self.crashed] = False  # crashed drones don't get truncated
         Truncated[self.finished] = False  # finished drones don't get truncated
@@ -303,6 +363,7 @@ class RaceEnv(MultiDroneAgentBase):
             "command_reward": np.mean(self.command_reward.copy()),
             "crash_reward": np.mean(self.crash_reward.copy()),
             "drone_safe_reward": np.mean(self.drone_safe_reward.copy()),
+            "obstacle_reward": np.mean(self.obstacle_reward.copy()) if self.NUM_OBSTACLES > 0 else 0.0,
             "num_waypoints": self.num_waypoints.copy(),
             "crash_rate": np.mean(self.crashed.copy()),
             # "finish_rate": np.mean(self.finished.copy()),
@@ -360,19 +421,34 @@ class RaceEnv(MultiDroneAgentBase):
         normalized_global_pos_z = np.clip((self.pos[:, 2:] - self.INIT_HEIGHT) / MAX_Z / 2, -1, 1)
         normalized_drone_dist = np.clip(np.linalg.norm(drone_rel_pos, axis=2, keepdims=True) / MAX_DRONE_D, 0, 1)
 
+        # Compute and normalize ray distances for obstacle detection
+        normalized_ray_distances = np.zeros((self.NUM_DRONES, self.NUM_RAYS))
+        if self.NUM_OBSTACLES > 0 and self.NUM_RAYS > 0:
+            for drone_idx in range(self.NUM_DRONES):
+                if not (self.crashed[drone_idx] or self.finished[drone_idx]):
+                    ray_distances = self._castRays(self.pos[drone_idx], self.rot[drone_idx])
+                    # Normalize ray distances to [0, 1] range (0 = obstacle at safe_dist, 1 = no obstacle within ray_length)
+                    # Closer distances get lower normalized values
+                    normalized_ray_distances[drone_idx] = np.clip(ray_distances / self.RAY_LENGTH, 0, 1)
+                else:
+                    normalized_ray_distances[drone_idx] = 1.0  # No obstacles detected for crashed/finished drones
+
         # stack all normalized self observations
-        self_obs = np.hstack(
-            [
-                normalized_rel_xy,
-                normalized_rel_z,
-                normalized_rel_xy_next,
-                normalized_rel_z_next,
-                normalized_vel_xy,
-                normalized_vel_z,
-                self.rot.reshape(self.NUM_DRONES, 9),
-                self.last_action,
-            ]
-        ).reshape(self.NUM_DRONES, self.self_obs_size)
+        obs_components = [
+            normalized_rel_xy,
+            normalized_rel_z,
+            normalized_rel_xy_next,
+            normalized_rel_z_next,
+            normalized_vel_xy,
+            normalized_vel_z,
+            self.rot.reshape(self.NUM_DRONES, 9),
+            self.last_action,
+        ]
+        # Add ray distances if obstacles are enabled
+        if self.NUM_OBSTACLES > 0 and self.NUM_RAYS > 0:
+            obs_components.append(normalized_ray_distances)
+
+        self_obs = np.hstack(obs_components).reshape(self.NUM_DRONES, self.self_obs_size)
 
         if self.OBS_TYPE == ObservationType.RACE_MULTI:
             # stack all normalized other observations
@@ -542,6 +618,7 @@ class RaceEnv(MultiDroneAgentBase):
         self.crash_reward = np.zeros(self.NUM_DRONES)
         self.drone_safe_reward = np.zeros(self.NUM_DRONES)
         self.drone_race_reward = np.zeros(self.NUM_DRONES)
+        self.obstacle_reward = np.zeros(self.NUM_DRONES)
 
         if self.DIM == SimulationDim.DIM_3:
             safe_distance = self.WAYPOINT_R

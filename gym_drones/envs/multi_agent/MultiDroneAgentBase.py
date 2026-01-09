@@ -35,6 +35,11 @@ class MultiDroneAgentBase(DroneBase):
         sensor_sigma: float = 0.01,
         domain_rand: bool = False,
         drone_model_path: Optional[Union[str, os.PathLike]] = None,
+        num_obstacles: int = 0,
+        obstacle_size: float = 0.5,
+        ray_length: float = 5.0,
+        num_rays: int = 12,
+        obstacle_safe_dist: float = 0.3,
     ):
         """Initialization of a generic multi-agent RL environment.
 
@@ -101,9 +106,16 @@ class MultiDroneAgentBase(DroneBase):
             ctrl_freq=ctrl_freq,
             domain_rand=domain_rand,
             drone_model_path=drone_model_path,
+            num_obstacles=num_obstacles,
+            obstacle_size=obstacle_size,
+            ray_length=ray_length,
+            num_rays=num_rays,
+            obstacle_safe_dist=obstacle_safe_dist,
         )
         #### Set observation space size ############################
         self._getObsSize()
+        #### Store obstacle parameters for reward computation #######
+        self.obstacle_reward_weight = 1.0  # lambda_obs in the reward equation
         #### Create action and observation spaces ##################
         # self.share_observation_space = self._shareObservationSpace()
         self.share_observation_space = self.observation_space
@@ -233,6 +245,9 @@ class MultiDroneAgentBase(DroneBase):
 
         #### Random Init ###########################################
         self._randomInit()
+        #### Generate Obstacles ######################################
+        if self.NUM_OBSTACLES > 0:
+            self._generateObstacles(min_dist_from_drones=2.0)
         #### Housekeeping ##########################################
         self._housekeeping()
         #### Return the initial observation ########################
@@ -331,16 +346,18 @@ class MultiDroneAgentBase(DroneBase):
             if self.ACT_TYPE == ActionType.RATE:
                 if self.DIM == SimulationDim.DIM_3:
                     ############################################################
-                    #### OBS SPACE OF SIZE 22 (Relative pos 1,2 + absolute vel #
-                    ########################## + rot matrix + last action) #####
+                    #### OBS SPACE OF SIZE 22 + NUM_RAYS (Relative pos 1,2 + absolute vel #
+                    ########################## + rot matrix + last action + ray distances) #####
                     #### Observation vector ### X1 Y1 Z1 X2 Y2 Z2 Vx Vy Vz
                     #### Observation vector ### rot_x rot_y rot_z at ap aq ar
+                    #### Observation vector ### ray_dist_1 ... ray_dist_N
                     obs_lower_bound = -1
                     obs_upper_bound = 1
+                    ray_obs_size = self.NUM_RAYS if self.NUM_OBSTACLES > 0 else 0
                     agent_obs_space = spaces.Box(
                         low=np.float32(obs_lower_bound),
                         high=np.float32(obs_upper_bound),
-                        shape=(22,),
+                        shape=(22 + ray_obs_size,),
                         dtype=np.float32,
                     )
                     ############################################################
@@ -352,16 +369,18 @@ class MultiDroneAgentBase(DroneBase):
             if self.ACT_TYPE == ActionType.RATE:
                 if self.DIM == SimulationDim.DIM_3:
                     ############################################################
-                    # Self OBS SPACE OF SIZE 22 (Relative pos 1,2 + absolute vel
-                    ########################## + rot matrix + last action) #####
+                    # Self OBS SPACE OF SIZE 22 + NUM_RAYS (Relative pos 1,2 + absolute vel
+                    ########################## + rot matrix + last action + ray distances) #####
                     # Other OBS SPACE OF SIZE 7*(NUM_DRONE - 1) (Rel pos + vel)
                     ########################## + drone_life ####################
                     #### Observation vector ### X1 Y1 Z1 X2 Y2 Z2 Vx Vy Vz
                     #### Observation vector ### rot_x rot_y rot_z at ap aq ar
+                    #### Observation vector ### ray_dist_1 ... ray_dist_N
                     #### Observation vector ### (r_x r_y r_z v_x v_y v_z) * NUM_DRONE
                     obs_lower_bound = -1
                     obs_upper_bound = 1
-                    obs_size = 22 + 7 * (self.NUM_DRONES - 1)
+                    ray_obs_size = self.NUM_RAYS if self.NUM_OBSTACLES > 0 else 0
+                    obs_size = 22 + ray_obs_size + 7 * (self.NUM_DRONES - 1)
                     # obs_size = 22 + 8*(self.NUM_DRONES - 1)
                     agent_obs_space = spaces.Box(
                         low=np.float32(obs_lower_bound),
@@ -553,12 +572,14 @@ class MultiDroneAgentBase(DroneBase):
 
     def _getObsSize(self) -> None:
         """Get the observation size of the environment."""
+        # Ray distances are added to self_obs_size
+        ray_obs_size = self.NUM_RAYS if self.NUM_OBSTACLES > 0 else 0
         if self.OBS_TYPE == ObservationType.RACE:
-            self.self_obs_size = 22
+            self.self_obs_size = 22 + ray_obs_size
             self.other_obs_size = 0
             self.global_obs_size = 0
         elif self.OBS_TYPE == ObservationType.RACE_MULTI:
-            self.self_obs_size = 22
+            self.self_obs_size = 22 + ray_obs_size
             self.other_obs_size = 7 * (self.NUM_DRONES - 1)  # 7 states per drone (rel pos + rel vel + rel dist)
             self.global_obs_size = 3
         else:

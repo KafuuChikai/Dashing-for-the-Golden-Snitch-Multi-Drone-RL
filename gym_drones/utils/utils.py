@@ -1,5 +1,4 @@
-"""General use functions.
-"""
+"""General use functions."""
 
 import time, os, glob
 import torch as th

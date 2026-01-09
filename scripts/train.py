@@ -77,6 +77,19 @@ def run():
         action="store_false",
         help="Do not reset the number of timesteps (default: use the value from config.yaml).",
     )
+    # Obstacle parameters
+    parser.add_argument("--num_obstacles", type=int, required=False, help="Number of obstacles in the environment.")
+    parser.add_argument(
+        "--obstacle_size", type=float, required=False, help="Size (diameter) of each obstacle in meters."
+    )
+    parser.add_argument("--ray_length", type=float, required=False, help="Maximum ray detection distance in meters.")
+    parser.add_argument("--num_rays", type=int, required=False, help="Number of rays cast by each drone.")
+    parser.add_argument(
+        "--obstacle_safe_dist", type=float, required=False, help="Safety margin distance for obstacles in meters."
+    )
+    parser.add_argument(
+        "--obstacle_reward_weight", type=float, required=False, help="Weight for obstacle avoidance reward."
+    )
 
     # Use the arguments
     args = parser.parse_args()

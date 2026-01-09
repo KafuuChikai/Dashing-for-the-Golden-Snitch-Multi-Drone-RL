@@ -1,5 +1,4 @@
-"""This module contains functions to process the configuration for the train and evaluate scripts.
-"""
+"""This module contains functions to process the configuration for the train and evaluate scripts."""
 
 import argparse, os, yaml
 from typing import Union, Optional
@@ -146,6 +145,45 @@ def _read_all_config(
     # Check if verbose is valid
     if config_dict["rl_hyperparams"]["verbose"] not in (0, 1, 2):
         raise ValueError("Invalid value for verbose. Allowed values are 0, 1 or 2.")
+
+    # Update the env_kwargs config_dict with obstacle parameters from command line arguments
+    num_obstacles = getattr(args, "num_obstacles", None)
+    if num_obstacles is not None:
+        if "env_kwargs" not in config_dict["env"]:
+            config_dict["env"]["env_kwargs"] = {}
+        config_dict["env"]["env_kwargs"]["num_obstacles"] = num_obstacles
+        print(f"[CONFIG DEBUG] Setting num_obstacles={num_obstacles} in env_kwargs")
+
+    obstacle_size = getattr(args, "obstacle_size", None)
+    if obstacle_size is not None:
+        if "env_kwargs" not in config_dict["env"]:
+            config_dict["env"]["env_kwargs"] = {}
+        config_dict["env"]["env_kwargs"]["obstacle_size"] = obstacle_size
+
+    ray_length = getattr(args, "ray_length", None)
+    if ray_length is not None:
+        if "env_kwargs" not in config_dict["env"]:
+            config_dict["env"]["env_kwargs"] = {}
+        config_dict["env"]["env_kwargs"]["ray_length"] = ray_length
+
+    num_rays = getattr(args, "num_rays", None)
+    if num_rays is not None:
+        if "env_kwargs" not in config_dict["env"]:
+            config_dict["env"]["env_kwargs"] = {}
+        config_dict["env"]["env_kwargs"]["num_rays"] = num_rays
+        print(f"[CONFIG DEBUG] Setting num_rays={num_rays} in env_kwargs")
+
+    obstacle_safe_dist = getattr(args, "obstacle_safe_dist", None)
+    if obstacle_safe_dist is not None:
+        if "env_kwargs" not in config_dict["env"]:
+            config_dict["env"]["env_kwargs"] = {}
+        config_dict["env"]["env_kwargs"]["obstacle_safe_dist"] = obstacle_safe_dist
+
+    obstacle_reward_weight = getattr(args, "obstacle_reward_weight", None)
+    if obstacle_reward_weight is not None:
+        if "env_kwargs" not in config_dict["env"]:
+            config_dict["env"]["env_kwargs"] = {}
+        config_dict["env"]["env_kwargs"]["obstacle_reward_weight"] = obstacle_reward_weight
 
     # Set default experiment name if not provided
     if config_dict["pyrl"]["exp_name"] is None:

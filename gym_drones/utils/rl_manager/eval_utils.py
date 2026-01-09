@@ -450,6 +450,7 @@ def _eval_sim_loop(
     # initialize the evaluation
     eval_loop = config_dict["logging"].get("eval_loop", 1)
     comment = None
+    gate_planner = None
     if track_name is not None:
         waypoints_track, comment, track_raw_data, gate_planner = _read_track(
             current_dir=current_dir, env=env, track_name=track_name, verbose=config_dict["rl_hyperparams"]["verbose"]
@@ -730,7 +731,16 @@ def eval_model(
             with open(save_track_path, "w", encoding="utf-8") as file:
                 yaml.dump(track_raw_data, file, default_flow_style=False)
 
+    # Extract obstacle data if available
+    obstacles = None
+    obstacle_size = 0.5
+    if hasattr(env, "obstacles") and hasattr(env, "NUM_OBSTACLES") and env.NUM_OBSTACLES > 0:
+        obstacles = env.obstacles.copy()
+        obstacle_size = env.OBSTACLE_SIZE
+        if config_dict["rl_hyperparams"]["verbose"] > 0:
+            print(f"[OBSTACLES] Found {len(obstacles)} obstacles for visualization")
+
     # close the environment
     env.close()
 
-    return logger, track_raw_data, moving_gate_data, noise_matrix, save_dir, comment
+    return logger, track_raw_data, moving_gate_data, noise_matrix, save_dir, comment, obstacles, obstacle_size

@@ -142,6 +142,13 @@ def build_env(
         print("Dimension:", config_dict["env"]["env_kwargs"]["dim"])
         print("Action Space:", env.action_space)
         print("Observation Space:", env.observation_space)
+        if "num_obstacles" in config_dict["env"]["env_kwargs"]:
+            print(
+                f"[OBSTACLE CONFIG] num_obstacles={config_dict['env']['env_kwargs']['num_obstacles']}, "
+                f"num_rays={config_dict['env']['env_kwargs'].get('num_rays', 'not set')}, "
+                f"obstacle_size={config_dict['env']['env_kwargs'].get('obstacle_size', 'not set')}, "
+                f"ray_length={config_dict['env']['env_kwargs'].get('ray_length', 'not set')}"
+            )
         if eval_mode:
             print("Evaluation sensor noise:", config_dict["env"]["env_kwargs"]["sensor_sigma"])
         else:

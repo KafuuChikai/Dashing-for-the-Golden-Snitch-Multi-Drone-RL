@@ -83,6 +83,19 @@ def run():
     parser.add_argument("--margin", type=float, required=False, help="Specify the margin for the waypoints.")
     parser.add_argument("--vis_config", type=str, default="waypoints", help="Specify the visualization config file.")
     parser.add_argument("--save_video", default=False, action="store_true", help="Save the video of the evaluation.")
+    # Obstacle parameters
+    parser.add_argument("--num_obstacles", type=int, required=False, help="Number of obstacles in the environment.")
+    parser.add_argument(
+        "--obstacle_size", type=float, required=False, help="Size (diameter) of each obstacle in meters."
+    )
+    parser.add_argument("--ray_length", type=float, required=False, help="Maximum ray detection distance in meters.")
+    parser.add_argument("--num_rays", type=int, required=False, help="Number of rays cast by each drone.")
+    parser.add_argument(
+        "--obstacle_safe_dist", type=float, required=False, help="Safety margin distance for obstacles in meters."
+    )
+    parser.add_argument(
+        "--obstacle_reward_weight", type=float, required=False, help="Weight for obstacle avoidance reward."
+    )
 
     # Use the arguments
     args = parser.parse_args()
@@ -121,7 +134,7 @@ def run():
     model = load_model(config_dict=config_dict, current_dir=current_dir, eval_mode=True)
 
     # evaluate the model and get the logger
-    logger, track_raw_data, moving_gate_data, noise_matrix, save_dir, comment = eval_model(
+    logger, track_raw_data, moving_gate_data, noise_matrix, save_dir, comment, obstacles, obstacle_size = eval_model(
         model=model,
         env=env,
         config_dict=config_dict,
@@ -145,6 +158,8 @@ def run():
         shape_kwargs=vis_config_dict["shape_kwargs"],
         noise_matrix=noise_matrix,
         moving_gate_data=moving_gate_data,
+        obstacles=obstacles,
+        obstacle_size=obstacle_size,
     )
 
     vis_config_dict["track_file"] = vis_config_dict.get("track_file", None)
